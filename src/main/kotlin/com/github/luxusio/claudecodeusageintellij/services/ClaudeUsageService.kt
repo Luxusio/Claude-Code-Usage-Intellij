@@ -1,124 +1,201 @@
 package com.github.luxusio.claudecodeusageintellij.services
 
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import com.github.luxusio.claudecodeusageintellij.model.ClaudeUsageResponse
+import com.github.luxusio.claudecodeusageintellij.model.ClaudeCommandUsageData
+import com.github.luxusio.claudecodeusageintellij.model.DailyUsageEntry
 import com.github.luxusio.claudecodeusageintellij.model.UsageSummary
-import com.github.luxusio.claudecodeusageintellij.model.toUsageSummary
+import com.github.luxusio.claudecodeusageintellij.parser.ClaudeCommandParser
+import com.github.luxusio.claudecodeusageintellij.parser.SessionFileLocator
+import com.github.luxusio.claudecodeusageintellij.parser.SessionFileParser
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.thisLogger
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.util.concurrent.TimeUnit
+import com.intellij.openapi.project.Project
+import java.io.File
+import java.time.LocalDate
 
 @Service(Service.Level.APP)
 class ClaudeUsageService {
 
-    private val objectMapper = ObjectMapper().registerKotlinModule()
+    private val sessionFileParser = SessionFileParser()
+    private val sessionFileLocator = SessionFileLocator()
+    private val commandParser = ClaudeCommandParser()
+
     private var cachedUsage: UsageSummary = UsageSummary.EMPTY
+    private var cachedCommandUsage: ClaudeCommandUsageData = ClaudeCommandUsageData.EMPTY
     private var lastFetchTime: Long = 0
-    private val cacheDurationMs: Long = 60_000 // 1 minute cache
+    private var lastCommandFetchTime: Long = 0
+    private val cacheDurationMs: Long = 30_000 // 30 second cache
+
+    // Token limit can be configured
+    var tokenLimit: Long = UsageSummary.DEFAULT_TOKEN_LIMIT
 
     companion object {
         fun getInstance(): ClaudeUsageService {
             return ApplicationManager.getApplication().getService(ClaudeUsageService::class.java)
         }
+
+        /**
+         * Get the project-specific claude directory name
+         */
+        fun getProjectDirName(projectPath: String): String {
+            return SessionFileLocator.getProjectDirName(projectPath)
+        }
     }
 
-    fun getUsage(forceRefresh: Boolean = false): UsageSummary {
+    /**
+     * Get usage for the current IDE project
+     */
+    fun getUsageForProject(project: Project?, forceRefresh: Boolean = false): UsageSummary {
+        val projectPath = project?.basePath ?: return UsageSummary.EMPTY
+        return getUsage(projectPath, forceRefresh)
+    }
+
+    /**
+     * Get usage for a specific project path
+     */
+    fun getUsage(projectPath: String? = null, forceRefresh: Boolean = false): UsageSummary {
         val now = System.currentTimeMillis()
         if (!forceRefresh && (now - lastFetchTime) < cacheDurationMs && cachedUsage != UsageSummary.EMPTY) {
             return cachedUsage
         }
 
         return try {
-            val usage = fetchUsageFromCli()
+            val usage = if (projectPath != null) {
+                fetchUsageForProject(projectPath)
+            } else {
+                fetchLatestSessionUsage()
+            }
             cachedUsage = usage
             lastFetchTime = now
             usage
         } catch (e: Exception) {
-            thisLogger().warn("Failed to fetch Claude usage: ${e.message}")
+            thisLogger().warn("Failed to fetch Claude usage: ${e.message}", e)
             cachedUsage
         }
     }
 
-    private fun fetchUsageFromCli(): UsageSummary {
-        val command = if (System.getProperty("os.name").lowercase().contains("win")) {
-            listOf("cmd", "/c", "claude", "usage", "--output", "json")
-        } else {
-            listOf("claude", "usage", "--output", "json")
+    /**
+     * Fetch usage for a specific project
+     */
+    private fun fetchUsageForProject(projectPath: String): UsageSummary {
+        val latestSession = sessionFileLocator.findLatestSessionFileInProject(projectPath)
+
+        if (latestSession == null) {
+            thisLogger().info("No session file found for project: $projectPath")
+            return UsageSummary.EMPTY.copy(tokenLimit = tokenLimit)
         }
 
-        val processBuilder = ProcessBuilder(command)
-        processBuilder.redirectErrorStream(true)
+        return parseSessionFile(latestSession)
+    }
 
-        val process = processBuilder.start()
-        val reader = BufferedReader(InputStreamReader(process.inputStream))
-        val output = StringBuilder()
+    /**
+     * Fetch usage from the latest session across all projects
+     */
+    private fun fetchLatestSessionUsage(): UsageSummary {
+        val latestSession = sessionFileLocator.findLatestSessionFile()
 
-        reader.use {
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                output.append(line)
+        if (latestSession == null) {
+            thisLogger().info("No session files found")
+            return UsageSummary.EMPTY.copy(tokenLimit = tokenLimit)
+        }
+
+        return parseSessionFile(latestSession)
+    }
+
+    /**
+     * Parse a session JSONL file and extract usage data
+     */
+    private fun parseSessionFile(file: File): UsageSummary {
+        return sessionFileParser.parseSessionFile(file, tokenLimit)
+    }
+
+    /**
+     * Get daily usage statistics for historical view
+     */
+    fun getDailyUsage(days: Int = 30): List<DailyUsageEntry> {
+        if (!sessionFileLocator.projectsDirExists()) {
+            return emptyList()
+        }
+
+        val cutoffDate = LocalDate.now().minusDays(days.toLong())
+        val dailyUsageMap = mutableMapOf<LocalDate, MutableList<Pair<String, UsageSummary>>>()
+
+        sessionFileLocator.findAllSessionFiles().forEach { sessionFile ->
+            try {
+                val summary = parseSessionFile(sessionFile)
+                val sessionDate = getSessionDate(sessionFile)
+
+                if (sessionDate != null && !sessionDate.isBefore(cutoffDate)) {
+                    dailyUsageMap.getOrPut(sessionDate) { mutableListOf() }
+                        .add(summary.sessionId to summary)
+                }
+            } catch (e: Exception) {
+                thisLogger().debug("Failed to parse session file: ${e.message}")
             }
         }
 
-        val finished = process.waitFor(30, TimeUnit.SECONDS)
-        if (!finished) {
-            process.destroyForcibly()
-            throw RuntimeException("Claude CLI command timed out")
-        }
-
-        val exitCode = process.exitValue()
-        if (exitCode != 0) {
-            thisLogger().warn("Claude CLI returned exit code $exitCode: $output")
-            throw RuntimeException("Claude CLI failed with exit code $exitCode")
-        }
-
-        val jsonOutput = output.toString().trim()
-        if (jsonOutput.isEmpty()) {
-            return UsageSummary.EMPTY
-        }
-
-        return parseUsageJson(jsonOutput)
-    }
-
-    private fun parseUsageJson(json: String): UsageSummary {
-        return try {
-            val response = objectMapper.readValue(json, ClaudeUsageResponse::class.java)
-            response.dailyUsage?.daily?.toUsageSummary() ?: UsageSummary.EMPTY
-        } catch (e: Exception) {
-            thisLogger().warn("Failed to parse usage JSON: ${e.message}")
-            // Try alternative parsing for different JSON structures
-            parseAlternativeJson(json)
-        }
-    }
-
-    private fun parseAlternativeJson(json: String): UsageSummary {
-        return try {
-            // Try parsing as a simple usage object
-            val node = objectMapper.readTree(json)
-
-            val tokensUsed = node.path("tokensUsed").asLong(0)
-            val costUsd = node.path("costUsd").asDouble(0.0)
-
-            UsageSummary(
-                todayTokens = tokensUsed,
-                todayCost = costUsd,
-                monthlyTokens = tokensUsed,
-                monthlyCost = costUsd,
-                dailyEntries = emptyList()
+        return dailyUsageMap.map { (date, sessions) ->
+            val uniqueSessions = sessions.distinctBy { it.first }
+            DailyUsageEntry(
+                date = date,
+                inputTokens = uniqueSessions.sumOf { it.second.inputTokens },
+                outputTokens = uniqueSessions.sumOf { it.second.outputTokens },
+                cacheCreationTokens = uniqueSessions.sumOf { it.second.cacheCreationTokens },
+                cacheReadTokens = uniqueSessions.sumOf { it.second.cacheReadTokens },
+                totalTokens = uniqueSessions.sumOf { it.second.totalTokens },
+                sessionCount = uniqueSessions.size
             )
-        } catch (e: Exception) {
-            thisLogger().warn("Failed to parse alternative usage JSON: ${e.message}")
-            UsageSummary.EMPTY
+        }.sortedByDescending { it.date }
+    }
+
+    /**
+     * Get the date of a session from the first timestamp in the file
+     */
+    private fun getSessionDate(file: File): LocalDate? {
+        return sessionFileParser.getSessionDate(file)
+    }
+
+    /**
+     * Refresh usage asynchronously
+     */
+    fun refreshUsageAsync(project: Project?, callback: (UsageSummary) -> Unit) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val usage = getUsageForProject(project, forceRefresh = true)
+            ApplicationManager.getApplication().invokeLater {
+                callback(usage)
+            }
         }
     }
 
-    fun refreshUsageAsync(callback: (UsageSummary) -> Unit) {
+    // ========== Command-based Usage Methods ==========
+
+    /**
+     * Get usage data from `claude /usage` command.
+     * This provides session and weekly usage percentages.
+     */
+    fun getCommandUsage(forceRefresh: Boolean = false): ClaudeCommandUsageData {
+        val now = System.currentTimeMillis()
+        if (!forceRefresh && (now - lastCommandFetchTime) < cacheDurationMs && cachedCommandUsage != ClaudeCommandUsageData.EMPTY) {
+            return cachedCommandUsage
+        }
+
+        return try {
+            val usage = commandParser.fetchUsage()
+            cachedCommandUsage = usage
+            lastCommandFetchTime = now
+            usage
+        } catch (e: Exception) {
+            thisLogger().warn("Failed to fetch Claude command usage: ${e.message}", e)
+            cachedCommandUsage
+        }
+    }
+
+    /**
+     * Refresh command-based usage asynchronously
+     */
+    fun refreshCommandUsageAsync(callback: (ClaudeCommandUsageData) -> Unit) {
         ApplicationManager.getApplication().executeOnPooledThread {
-            val usage = getUsage(forceRefresh = true)
+            val usage = getCommandUsage(forceRefresh = true)
             ApplicationManager.getApplication().invokeLater {
                 callback(usage)
             }

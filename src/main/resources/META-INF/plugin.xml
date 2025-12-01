@@ -9,6 +9,19 @@
     <resource-bundle>messages.ClaudeBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
+        <!-- Application Service for Settings Storage -->
+        <applicationService
+            serviceImplementation="com.github.luxusio.claudecodeusageintellij.settings.ClaudeUsageSettings"
+        />
+
+        <!-- Settings Configurable -->
+        <applicationConfigurable
+            parentId="tools"
+            instance="com.github.luxusio.claudecodeusageintellij.settings.ClaudeUsageConfigurable"
+            id="com.github.luxusio.claudecodeusageintellij.settings.ClaudeUsageConfigurable"
+            displayName="Claude Code Usage"
+        />
+
         <!-- Tool Window for detailed usage view -->
         <toolWindow
             id="Claude Usage"

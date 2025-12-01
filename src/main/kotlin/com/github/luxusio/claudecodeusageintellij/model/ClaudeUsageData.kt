@@ -2,62 +2,120 @@ package com.github.luxusio.claudecodeusageintellij.model
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
+import java.time.Instant
 import java.time.LocalDate
-import java.time.format.DateTimeFormatter
+import java.time.ZoneId
 
+/**
+ * Represents a single message entry from Claude's JSONL session files
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
-data class ClaudeUsageResponse(
-    @param:JsonProperty("dailyUsage")
-    val dailyUsage: DailyUsage? = null
+data class SessionMessage(
+    @param:JsonProperty("type")
+    val type: String = "",
+    @param:JsonProperty("sessionId")
+    val sessionId: String = "",
+    @param:JsonProperty("timestamp")
+    val timestamp: String = "",
+    @param:JsonProperty("message")
+    val message: MessageContent? = null
 )
 
 @JsonIgnoreProperties(ignoreUnknown = true)
-data class DailyUsage(
-    @param:JsonProperty("daily")
-    val daily: List<DailyEntry> = emptyList()
+data class MessageContent(
+    @param:JsonProperty("role")
+    val role: String = "",
+    @param:JsonProperty("model")
+    val model: String? = null,
+    @param:JsonProperty("usage")
+    val usage: TokenUsage? = null
 )
 
 @JsonIgnoreProperties(ignoreUnknown = true)
-data class DailyEntry(
-    @param:JsonProperty("date")
-    val date: String = "",
-    @param:JsonProperty("tokensUsed")
-    val tokensUsed: Long = 0,
-    @param:JsonProperty("costUsd")
-    val costUsd: Double = 0.0
-)
+data class TokenUsage(
+    @param:JsonProperty("input_tokens")
+    val inputTokens: Long = 0,
+    @param:JsonProperty("output_tokens")
+    val outputTokens: Long = 0,
+    @param:JsonProperty("cache_creation_input_tokens")
+    val cacheCreationInputTokens: Long = 0,
+    @param:JsonProperty("cache_read_input_tokens")
+    val cacheReadInputTokens: Long = 0
+) {
+    val totalTokens: Long
+        get() = inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens
+}
 
+/**
+ * Aggregated usage data for display
+ */
 data class UsageSummary(
-    val todayTokens: Long,
-    val todayCost: Double,
-    val monthlyTokens: Long,
-    val monthlyCost: Double,
-    val dailyEntries: List<DailyEntry>,
+    val sessionId: String,
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val cacheCreationTokens: Long,
+    val cacheReadTokens: Long,
+    val totalTokens: Long,
+    val tokenLimit: Long,
     val lastUpdated: Long = System.currentTimeMillis()
 ) {
+    val usagePercentage: Double
+        get() = if (tokenLimit > 0) (totalTokens.toDouble() / tokenLimit * 100).coerceIn(0.0, 100.0) else 0.0
+
     companion object {
+        const val DEFAULT_TOKEN_LIMIT = 200_000L // Default context window size
+
         val EMPTY = UsageSummary(
-            todayTokens = 0,
-            todayCost = 0.0,
-            monthlyTokens = 0,
-            monthlyCost = 0.0,
-            dailyEntries = emptyList()
+            sessionId = "",
+            inputTokens = 0,
+            outputTokens = 0,
+            cacheCreationTokens = 0,
+            cacheReadTokens = 0,
+            totalTokens = 0,
+            tokenLimit = DEFAULT_TOKEN_LIMIT
         )
     }
 }
 
-fun List<DailyEntry>.toUsageSummary(): UsageSummary {
-    val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
-    val currentMonth = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM"))
+/**
+ * Daily usage entry for historical tracking
+ */
+data class DailyUsageEntry(
+    val date: LocalDate,
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val cacheCreationTokens: Long,
+    val cacheReadTokens: Long,
+    val totalTokens: Long,
+    val sessionCount: Int
+)
 
-    val todayEntry = this.find { it.date == today }
-    val monthlyEntries = this.filter { it.date.startsWith(currentMonth) }
+/**
+ * Extension to parse timestamp string to LocalDate
+ */
+fun String.toLocalDate(): LocalDate? {
+    return try {
+        Instant.parse(this).atZone(ZoneId.systemDefault()).toLocalDate()
+    } catch (e: Exception) {
+        null
+    }
+}
 
-    return UsageSummary(
-        todayTokens = todayEntry?.tokensUsed ?: 0,
-        todayCost = todayEntry?.costUsd ?: 0.0,
-        monthlyTokens = monthlyEntries.sumOf { it.tokensUsed },
-        monthlyCost = monthlyEntries.sumOf { it.costUsd },
-        dailyEntries = this
-    )
+/**
+ * Usage data from `claude /usage` command output.
+ * Contains percentage values for session and weekly usage.
+ */
+data class ClaudeCommandUsageData(
+    val sessionPercentage: Int,
+    val weekAllModelsPercentage: Int,
+    val weekSonnetOnlyPercentage: Int,
+    val lastUpdated: Long = System.currentTimeMillis()
+) {
+    companion object {
+        val EMPTY = ClaudeCommandUsageData(
+            sessionPercentage = 0,
+            weekAllModelsPercentage = 0,
+            weekSonnetOnlyPercentage = 0
+        )
+    }
 }

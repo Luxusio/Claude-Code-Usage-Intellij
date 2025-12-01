@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude:*)",
+      "Bash(./gradlew build:*)",
+      "Bash(/usr/libexec/java_home:*)",
+      "Bash(JAVA_HOME=/Users/luxus/Library/Java/JavaVirtualMachines/corretto-21.0.8/Contents/Home ./gradlew build:*)",
+      "Bash(./gradlew test:*)",
+      "Bash(JAVA_HOME=/Users/luxus/Library/Java/JavaVirtualMachines/corretto-21.0.8/Contents/Home ./gradlew test:*)",
+      "Bash(xargs ls:*)",
+      "WebSearch",
+      "Bash(./gradlew:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
