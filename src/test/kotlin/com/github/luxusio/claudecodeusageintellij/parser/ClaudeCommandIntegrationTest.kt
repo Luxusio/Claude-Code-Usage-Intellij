@@ -34,17 +34,19 @@ class ClaudeCommandIntegrationTest {
     }
 
     @Test
-    fun `executeCommand - executes without exception`() {
+    fun `executeCommand - returns usage data`() {
         val parser = ClaudeCommandParser("/opt/homebrew/bin/claude")
 
         val output = parser.executeCommand()
 
         println("Raw command output length: ${output.length}")
-        println("Raw command output (first 500 chars):")
-        println(output.take(500))
+        println("Raw command output (first 1000 chars):")
+        println(output.take(1000))
+        println("---")
+        println("Cleaned output:")
+        println(parser.removeAnsiCodes(output).take(500))
 
-        // Just verify it doesn't throw an exception
-        // Output may be empty in some test environments
-        assertNotNull("Output should not be null", output)
+        assertTrue("Command should return non-empty output", output.isNotBlank())
+        assertTrue("Output should contain usage data", output.contains("used") || output.contains("session"))
     }
 }

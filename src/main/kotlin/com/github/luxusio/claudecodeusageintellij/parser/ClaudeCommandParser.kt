@@ -3,8 +3,7 @@ package com.github.luxusio.claudecodeusageintellij.parser
 import com.github.luxusio.claudecodeusageintellij.model.ClaudeCommandUsageData
 import com.intellij.openapi.diagnostic.thisLogger
 import com.pty4j.PtyProcessBuilder
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import com.pty4j.WinSize
 
 /**
  * Parser for `claude /usage` command output.
@@ -53,66 +52,70 @@ class ClaudeCommandParser(
         val cmd = arrayOf(claudeCommandPath, "/usage")
         val env = System.getenv().toMutableMap().apply {
             put("TERM", "xterm-256color")
+            put("COLORTERM", "truecolor")
         }
 
-        val process = PtyProcessBuilder()
+        // Use current working directory (should be a trusted project directory)
+        val workingDir = System.getProperty("user.dir") ?: System.getProperty("user.home")
+
+        val ptyProcess = PtyProcessBuilder()
             .setCommand(cmd)
             .setEnvironment(env)
-            .setDirectory(System.getProperty("user.home"))
-            .setConsole(false)
+            .setDirectory(workingDir)
+            .setInitialColumns(120)
+            .setInitialRows(40)
             .start()
 
         val output = StringBuilder()
-        val inputStream = process.inputStream
+        val inputStream = ptyProcess.inputStream
 
         val startTime = System.currentTimeMillis()
-        var foundUsageData = false
 
-        // Read output until we find "% used" or timeout
-        while (System.currentTimeMillis() - startTime < COMMAND_TIMEOUT_MS) {
-            val available = inputStream.available()
-            if (available > 0) {
-                val buffer = ByteArray(available)
-                val read = inputStream.read(buffer)
-                if (read > 0) {
-                    output.append(String(buffer, 0, read))
-
-                    // Check if we found usage data
-                    if (output.contains("% used")) {
-                        foundUsageData = true
-                        // Wait a bit more for complete data
-                        Thread.sleep(2000)
-
-                        // Read remaining available data
-                        val remaining = inputStream.available()
-                        if (remaining > 0) {
-                            val remainingBuffer = ByteArray(remaining)
-                            val remainingRead = inputStream.read(remainingBuffer)
-                            if (remainingRead > 0) {
-                                output.append(String(remainingBuffer, 0, remainingRead))
-                            }
+        // Read output in a separate thread
+        val readerThread = Thread {
+            try {
+                val buffer = ByteArray(4096)
+                while (!Thread.currentThread().isInterrupted) {
+                    val read = inputStream.read(buffer)
+                    if (read == -1) break
+                    if (read > 0) {
+                        synchronized(output) {
+                            output.append(String(buffer, 0, read))
                         }
-                        break
                     }
                 }
-            } else {
-                Thread.sleep(100)
+            } catch (e: Exception) {
+                // Ignore read errors
             }
+        }
+        readerThread.start()
+
+        // Wait until we find "% used" or timeout
+        while (System.currentTimeMillis() - startTime < COMMAND_TIMEOUT_MS) {
+            val currentOutput = synchronized(output) { output.toString() }
+            if (currentOutput.contains("% used")) {
+                // Wait a bit more for complete data
+                Thread.sleep(2000)
+                break
+            }
+            Thread.sleep(100)
         }
 
         // Send ESC to close the dialog
         try {
-            process.outputStream.write(27) // ESC key
-            process.outputStream.flush()
+            ptyProcess.outputStream.write(27) // ESC key
+            ptyProcess.outputStream.flush()
+            Thread.sleep(500)
         } catch (e: Exception) {
             // Ignore write errors
         }
 
         // Clean up
-        process.destroyForcibly()
+        readerThread.interrupt()
+        ptyProcess.destroyForcibly()
+        readerThread.join(1000)
 
-        // Return whatever output we collected (may be empty or partial)
-        return output.toString()
+        return synchronized(output) { output.toString() }
     }
 
     /**
